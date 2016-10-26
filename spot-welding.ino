@@ -52,6 +52,9 @@ bool bBlink;
 #define __UNHOLD  {bHold  = false;}
 bool bHold;
 
+const uint8_t pinBrightness = 10;
+int16_t brightness = 200;
+
 // UI update flag
 #define UPDATE_NONE  0
 #define UPDATE_1ST   1
@@ -131,6 +134,9 @@ void setup()
   eepromLoad();
 
   // Show splash screen
+  pinMode(pinBrightness, OUTPUT);
+  analogWrite(pinBrightness, brightness);
+  
   lcd.setCursor(0, 0);   lcd.print("  Spot Welding");
   lcd.setCursor(0, 1);   lcd.print("  2016 (C) LOM");
   delay(1000);
@@ -213,6 +219,15 @@ void loop()
 
     __UPDATE(menuItem);
     __ACTIVE;
+  } // if
+
+  if (encoderIncrement && __MODE_READY) {
+    brightness += encoderIncrement;
+    if (brightness>255) brightness = 255;
+    if (brightness<5) brightness = 5;
+
+    analogWrite(pinBrightness, brightness);
+    EEPROM.put(MENU_ITEMS*sizeof(uint16_t), brightness);
   } // if
 
   // Get encoder shaft state
@@ -327,11 +342,15 @@ void eepromLoad() {
   __SERIAL_LN("Load data from EEPROM");
   for (int i = 0; i < MENU_ITEMS; i++)
     EEPROM.get(i * sizeof(uint16_t), menuData[i]);
+    
+  EEPROM.get(MENU_ITEMS*sizeof(uint16_t), brightness);
 }
 void eepromSave() {
   __SERIAL_LN("Save data from EEPROM");
   for (int i = 0; i < MENU_ITEMS; i++)
     EEPROM.put(i * sizeof(uint16_t), menuData[i]);
+    
+  EEPROM.put(MENU_ITEMS*sizeof(uint16_t), brightness);
 }
 
 // Interrupt is called once a millisecond,
