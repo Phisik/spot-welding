@@ -4,11 +4,11 @@
 
 //#define __DEBUG
 #ifdef __DEBUG
-#  define __PRINT(msg)     {Serial.print(msg);}
-#  define __PRINTLN(msg)   {Serial.println(msg);}
+#  define __SERIAL(msg)     {Serial.print(msg);}
+#  define __SERIAL_LN(msg)   {Serial.println(msg);}
 #else
-#  define __PRINT(msg)
-#  define __PRINTLN(msg)
+#  define __SERIAL(msg)
+#  define __SERIAL_LN(msg)
 #endif
 
 // Menu setup
@@ -34,17 +34,17 @@ const uint16_t menuTimeout = 5000; // ms
 
 uint8_t modeUI = MODE_READY;
 
-#define TIMER_NUM 3
+#define TIMER_NUM 5
 #define __TIMEOUT(n,a) {timer[(n)] = millis(); timerDelay[(n)] = (a);}
 #define __TCHECK(n) ((millis()-timer[(n)])>timerDelay[(n)])
 uint32_t timer[TIMER_NUM];           // timeout start point
 uint16_t timerDelay[TIMER_NUM];      // UI timout in ms
 
-#define BLINK_ON   700   // ms
-#define BLINK_OFF  300   // ms
+#define BLINK_ON_TIME   700   // ms
+#define BLINK_OFF_TIME  300   // ms
 
-#define __BLINK_START   { bBlink = true; __TIMEOUT(1, BLINK_ON); }
-#define __BLINK_CHANGE  { bBlink ^= 1; __TIMEOUT(1, (bBlink) ? BLINK_ON : BLINK_OFF); }
+#define __BLINK_START   { bBlink = true; __TIMEOUT(1, BLINK_ON_TIME); }
+#define __BLINK_CHANGE  { bBlink ^= 1; __TIMEOUT(1, (bBlink) ? BLINK_ON_TIME : BLINK_OFF_TIME); }
 #define __BLINK          __TCHECK(1)
 bool bBlink;
 
@@ -62,7 +62,7 @@ bool bHold;
 #define __UPDATE(mi) {needUpdateUI = (mi<MENU_PDURATION)?UPDATE_1ST:UPDATE_2ND;}
 uint8_t needUpdateUI = UPDATE_ALL;
 
-#define __ACTIVE  { __TIMEOUT(0, menuTimeout); __PRINT("Set active state. Timeout is ");  __PRINTLN(menuTimeout); }
+#define __ACTIVE  { __TIMEOUT(0, menuTimeout); __SERIAL("Set active state. Timeout is ");  __SERIAL_LN(menuTimeout); }
 #define __IDLE    __TCHECK(0)
 
 // Setup encoder
@@ -85,6 +85,14 @@ const uint8_t pinZero = 2;
 volatile bool flagFire = false;
 volatile bool flagZero = false;
 volatile uint32_t zeroCrossTime = 1000000000L;
+
+
+// Use timeout before turning fan off after welding
+#define __FAN_START      { flagFan=true;  digitalWrite(pinFan, HIGH); }
+#define __FAN_STOP       { flagFan=false; digitalWrite(pinFan, LOW);  }
+#define __FAN_DELAY      __TIMEOUT(3, 10000)
+#define __FAN_TIMEOUT    __TCHECK(3)
+bool flagFan = false;
 
 // Setup LCD display
 LiquidCrystal lcd(A2, A1, A0, 13, 12, 11);
@@ -119,6 +127,7 @@ void setup()
   OCR0A = 0xAF;
   TIMSK0 |= _BV(OCIE0A);
 
+  // Load setings from EEPROM
   eepromLoad();
 
   // Show splash screen
@@ -126,6 +135,7 @@ void setup()
   lcd.setCursor(0, 1);   lcd.print("  2016 (C) LOM");
   delay(1000);
 
+  // Setup flags & modes
   modeUI = MODE_READY;
   flagFire = false;
   flagZero = false;
@@ -133,17 +143,17 @@ void setup()
 
 void loop()
 {
-  //  if (flagZero && (micros() > zeroCrossTime + 100 * menuData[MENU_PSHIFT])) {
-  //    digitalWrite(pinWeld, HIGH);
-  //    delay(1);
-  //    digitalWrite(pinWeld, LOW);
-  //    flagZero = false;
-  //  }
+  // Check if fan is turned on and switch it off by timout
+  if ( flagFan && __FAN_TIMEOUT ) __FAN_STOP;
 
+  // Check if weld button is pressed & do the things right
   if (flagFire) {
     const int ms = menuData[MENU_PDURATION];
     const int us = 100 * menuData[MENU_PSHIFT] + 300;
-    const int pause = max(ms, 100);
+    // Pause between pulses will be equal to pulse time but not less than 100ms
+    const int pause = max(ms, 100);  
+
+    __FAN_START;
 
     lcd.clear();
     lcd.setCursor(0, 0);
@@ -162,9 +172,12 @@ void loop()
       lcd.setCursor(10, 0);
       lcd.print(i + 1);
 
+      // Wait for zero cross
       flagZero = false;
       while (!flagZero)
-        ; // empty cycle, wait for zero cross
+        ; // empty cycle
+
+      // Weld it nice & easy! :)
       delayMicroseconds(us);
       digitalWrite(pinWeld, HIGH);
       delay(ms);
@@ -177,19 +190,20 @@ void loop()
 
     __UPDATE_ALL;
     flagFire = false;
+    __FAN_DELAY;
   }
 
 
   // Get encoder shaft state
   encoderIncrement = -encoder->getValue();
   if (encoderIncrement && __MODE_MENU) {
-    __PRINT("Encoder increment: ");
-    __PRINTLN(encoderIncrement);
+    __SERIAL("Encoder increment: ");
+    __SERIAL_LN(encoderIncrement);
 
     menuData[menuItem] += encoderIncrement * menuIncrement[menuItem];
 
-    __PRINT("New parameter value: ");
-    __PRINTLN(menuData[menuItem]);
+    __SERIAL("New parameter value: ");
+    __SERIAL_LN(menuData[menuItem]);
 
     if ( menuData[menuItem] > menuDataMax[menuItem] )
       menuData[menuItem] = menuDataMax[menuItem];
@@ -204,7 +218,7 @@ void loop()
   // Get encoder shaft state
   encoderButton = encoder->getButton();
   if (encoderButton != ClickEncoder::Open) {
-    __PRINTLN("Button event happened");
+    __SERIAL_LN("Button event happened");
     __ACTIVE;
 
     switch (encoderButton) {
@@ -212,7 +226,7 @@ void loop()
         break;
       case ClickEncoder::Held:
         if ( __MODE_READY && !bHold) {
-          __PRINTLN("Mode changed to MENU by User");
+          __SERIAL_LN("Mode changed to MENU by User");
 
           modeUI = MODE_MENU;
           menuItem = 0;
@@ -221,7 +235,7 @@ void loop()
           __HOLD;
         }
         if ( __MODE_MENU && !bHold) {
-          __PRINTLN("Mode changed to READY by User");
+          __SERIAL_LN("Mode changed to READY by User");
 
           modeUI = MODE_READY;
           __UPDATE_ALL;
@@ -247,11 +261,11 @@ void loop()
         }
         break;
     }
-  } //
+  } // if
 
   // Exit menu mode by timout
   if ( __MODE_MENU && __IDLE) {
-    __PRINTLN("Mode changed to READY by timeout");
+    __SERIAL_LN("Mode changed to READY by timeout");
     modeUI = MODE_READY;
     eepromSave();
     __UPDATE_ALL;
@@ -263,10 +277,9 @@ void loop()
     __UPDATE(menuItem);
   }
 
-
-  // Update on screen data
+  // Update 1st line on screen
   if (needUpdateUI == UPDATE_1ST || needUpdateUI == UPDATE_ALL) {
-    __PRINTLN("Update 1st line");
+    __SERIAL_LN("Update 1st line");
 
     lcd.setCursor(0, 0);
     lcd.print("NP:  , PS:     ");
@@ -280,12 +293,14 @@ void loop()
       lcd.setCursor(11, 0);
       lcd.print(menuData[MENU_PSHIFT]);
       lcd.print("%");
-      __UPDATE(MENU_PDURATION);
+      // Since pulse duration depends on zero shift, we need update it too
+      __UPDATE(MENU_PDURATION);  
     }
   }
-
+  
+  // Update 2nd line on screen
   if (needUpdateUI == UPDATE_2ND || needUpdateUI == UPDATE_ALL) {
-    __PRINTLN("Update 2nd line");
+    __SERIAL_LN("Update 2nd line");
 
     lcd.setCursor(0, 1);
     lcd.print("PD:             ");
@@ -296,6 +311,7 @@ void loop()
     }
   }
 
+  // Reset update flag
   if (needUpdateUI)
     needUpdateUI = UPDATE_NONE;
 
@@ -308,12 +324,12 @@ void zeroCrossInterrupt() {
 }
 
 void eepromLoad() {
-  __PRINTLN("Load data from EEPROM");
+  __SERIAL_LN("Load data from EEPROM");
   for (int i = 0; i < MENU_ITEMS; i++)
     EEPROM.get(i * sizeof(uint16_t), menuData[i]);
 }
 void eepromSave() {
-  __PRINTLN("Save data from EEPROM");
+  __SERIAL_LN("Save data from EEPROM");
   for (int i = 0; i < MENU_ITEMS; i++)
     EEPROM.put(i * sizeof(uint16_t), menuData[i]);
 }
@@ -324,7 +340,7 @@ SIGNAL(TIMER0_COMPA_vect)
   // We add encoder routine to timer0
   encoder->service();
 
-  // Follow FIRE button
+  // Track FIRE button
   if (!flagFire && digitalRead(pinFire) == LOW)
     flagFire = true;
 }
