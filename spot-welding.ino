@@ -3,102 +3,13 @@
 #include "ClickEncoder.h"
 
 //#define __DEBUG
-#ifdef __DEBUG
-#  define __SERIAL(msg)     {Serial.print(msg);}
-#  define __SERIAL_LN(msg)   {Serial.println(msg);}
-#else
-#  define __SERIAL(msg)
-#  define __SERIAL_LN(msg)
-#endif
 
-// Menu setup
-#define MENU_ITEMS      3
-#define MENU_PNUM       0
-#define MENU_PSHIFT     1
-#define MENU_PDURATION  2
-
-int16_t menuData[MENU_ITEMS] = {1, 50, 1000};
-const int16_t menuDataMax[MENU_ITEMS] = {9, 90, 30000};
-const int8_t menuDataMin[MENU_ITEMS] = {1, 10, 0};
-const int8_t menuIncrement[MENU_ITEMS] = {1, 1, 10};
-
-int8_t menuItem = 0;  // Currently selected item
-const uint16_t menuTimeout = 5000; // ms
-
-// UI setup
-#define MODE_READY  0
-#define MODE_MENU   1
-
-#define __MODE_READY (modeUI == MODE_READY)
-#define __MODE_MENU  (modeUI == MODE_MENU)
-
-uint8_t modeUI = MODE_READY;
-
-#define TIMER_NUM 5
-#define __TIMEOUT(n,a) {timer[(n)] = millis(); timerDelay[(n)] = (a);}
-#define __TCHECK(n) ((millis()-timer[(n)])>timerDelay[(n)])
-uint32_t timer[TIMER_NUM];           // timeout start point
-uint16_t timerDelay[TIMER_NUM];      // UI timout in ms
-
-#define BLINK_ON_TIME   700   // ms
-#define BLINK_OFF_TIME  300   // ms
-
-#define __BLINK_START   { bBlink = true; __TIMEOUT(1, BLINK_ON_TIME); }
-#define __BLINK_CHANGE  { bBlink ^= 1; __TIMEOUT(1, (bBlink) ? BLINK_ON_TIME : BLINK_OFF_TIME); }
-#define __BLINK          __TCHECK(1)
-bool bBlink;
-
-#define __HOLD    {bHold  = true;}
-#define __UNHOLD  {bHold  = false;}
-bool bHold;
-
-const uint8_t pinBrightness = 10;
-int16_t brightness = 200;
-
-// UI update flag
-#define UPDATE_NONE  0
-#define UPDATE_1ST   1
-#define UPDATE_2ND   2
-#define UPDATE_ALL   3
-
-#define __UPDATE_ALL {needUpdateUI = UPDATE_ALL; }
-#define __UPDATE(mi) {needUpdateUI = (mi<MENU_PDURATION)?UPDATE_1ST:UPDATE_2ND;}
-uint8_t needUpdateUI = UPDATE_ALL;
-
-#define __ACTIVE  { __TIMEOUT(0, menuTimeout); __SERIAL("Set active state. Timeout is ");  __SERIAL_LN(menuTimeout); }
-#define __IDLE    __TCHECK(0)
-
-// Setup encoder
-const uint8_t stepsPerNotch = 2;
-const uint8_t pinA   = 9;
-const uint8_t pinB   = A4;
-const uint8_t pinCLK = A5;
-int16_t encoderIncrement;
-
-ClickEncoder *encoder;
-ClickEncoder::Button encoderButton;
-
-
-// Pins definition
-const uint8_t pinWeld = 4;
-const uint8_t pinFan  = 3;
-const uint8_t pinFire = 8;
-const uint8_t pinZero = 2;
-
-volatile bool flagFire = false;
-volatile bool flagZero = false;
-volatile uint32_t zeroCrossTime = 1000000000L;
-
-
-// Use timeout before turning fan off after welding
-#define __FAN_START      { flagFan=true;  digitalWrite(pinFan, HIGH); }
-#define __FAN_STOP       { flagFan=false; digitalWrite(pinFan, LOW);  }
-#define __FAN_DELAY      __TIMEOUT(3, 10000)
-#define __FAN_TIMEOUT    __TCHECK(3)
-bool flagFan = false;
+// All our difinitions and global variables are in welding.h
+#include "welding.h"
 
 // Setup LCD display
 LiquidCrystal lcd(A2, A1, A0, 13, 12, 11);
+
 
 void setup()
 {
@@ -139,13 +50,14 @@ void setup()
   
   lcd.setCursor(0, 0);   lcd.print("  Spot Welding");
   lcd.setCursor(0, 1);   lcd.print("  2016 (C) LOM");
-  delay(1000);
+  delay(ONE_SECOND);
 
   // Setup flags & modes
   modeUI = MODE_READY;
   flagFire = false;
   flagZero = false;
 } // setup()
+
 
 void loop()
 {
@@ -154,49 +66,74 @@ void loop()
 
   // Check if weld button is pressed & do the things right
   if (flagFire) {
-    const int ms = menuData[MENU_PDURATION];
-    const int us = 100 * menuData[MENU_PSHIFT] + 300;
-    // Pause between pulses will be equal to pulse time but not less than 100ms
-    const int pause = max(ms, 100);  
+    // We will manage every half-wave, so let's count how many half-waves will be
+    const uint32_t nHalfWaveNum = menuData[MENU_PDURATION]/(0.001*zeroCrossPeriod);
+    __SERIAL("Half Wave number is ");
+    __SERIAL_LN(nHalfWaveNum);
 
+    // Pulse power is inversely propotional to the moment of triac firing
+    // NB! We do not account for delay between zero-cross interrupt and real zero crossing
+    const int fireDelay = zeroCrossPeriod - 100 * user2power(menuData[MENU_POWER]); 
+    __SERIAL("Fire delay is ");
+    __SERIAL_LN(fireDelay);
+      
+    // Pause between pulses will be equal to pulse time but not less than 100ms and not more that 1s
+    const int pause = min(max(menuData[MENU_PDURATION], 100), ONE_SECOND);  
+    
     __FAN_START;
 
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Ignite in 3 sec ");
-    delay(1000);
+    delay(ONE_SECOND);
     lcd.setCursor(0, 0);
     lcd.print("Ignite in 2 sec ");
-    delay(1000);
+    delay(ONE_SECOND);
     lcd.setCursor(0, 0);
     lcd.print("Ignite in 1 sec ");
-    delay(1000);
+    delay(ONE_SECOND);
 
-    for (int i = 0; i < menuData[MENU_PNUM]; i++, delay(pause)) {
+    for (int i = 0; i < menuData[MENU_PNUM]; i++) {
+      if (i>0) delay(pause);
+      
       lcd.setCursor(0, 0);
       lcd.print("Ignition #      ");
       lcd.setCursor(10, 0);
       lcd.print(i + 1);
 
-      // Wait for zero cross
-      flagZero = false;
-      while (!flagZero)
-        ; // empty cycle
+      // Ignite first half wave here to avoid any computations inside fire loop
+      wait4ZeroCross();
+      delayMicroseconds(zeroCrossDelay);
+      delayMicroseconds((fireDelay<zeroCrossHalfPeriod)?fireDelay:zeroCrossHalfPeriod); 
+      __TRIAC_ON;
 
-      // Weld it nice & easy! :)
-      delayMicroseconds(us);
-      digitalWrite(pinWeld, HIGH);
-      delay(ms);
-      digitalWrite(pinWeld, LOW);
+      // Fire loop, minimum code here to efficiency
+      for(int j = 1; j < nHalfWaveNum; j++){
+        // First of all we wait for zero crossing and turn off triac
+        wait4ZeroCross();
+        __TRIAC_OFF;
+        
+        // Now we wait for ignition moment and ...
+        delayMicroseconds(zeroCrossDelay); 
+        delayMicroseconds(fireDelay); 
+        
+        // Fire! :)
+        __TRIAC_ON;
+      }
+
+      // Don't forget to switch the triac off when everything is done
+      wait4ZeroCross();
+      __TRIAC_OFF;
     }
 
     lcd.setCursor(0, 0);
     lcd.print("Done!           ");
-    delay(1000);
+    delay(ONE_SECOND);
 
     __UPDATE_ALL;
     flagFire = false;
     __FAN_DELAY;
+    
   }
 
 
@@ -244,7 +181,7 @@ void loop()
           __SERIAL_LN("Mode changed to MENU by User");
 
           modeUI = MODE_MENU;
-          menuItem = 0;
+          menuItem = MENU_PDURATION;
           __UPDATE_ALL;
           __BLINK_START;
           __HOLD;
@@ -297,16 +234,16 @@ void loop()
     __SERIAL_LN("Update 1st line");
 
     lcd.setCursor(0, 0);
-    lcd.print("NP:  , PS:     ");
+    lcd.print("NP:  , PW:     ");
 
     if (modeUI == MODE_READY || bBlink || menuItem != MENU_PNUM) {
       lcd.setCursor(4, 0);
       lcd.print(menuData[MENU_PNUM]);
     }
 
-    if (modeUI == MODE_READY || bBlink || menuItem != MENU_PSHIFT ) {
+    if (modeUI == MODE_READY || bBlink || menuItem != MENU_POWER ) {
       lcd.setCursor(11, 0);
-      lcd.print(menuData[MENU_PSHIFT]);
+      lcd.print(menuData[MENU_POWER]);
       lcd.print("%");
       // Since pulse duration depends on zero shift, we need update it too
       __UPDATE(MENU_PDURATION);  
@@ -321,7 +258,7 @@ void loop()
     lcd.print("PD:             ");
     if (modeUI == MODE_READY || bBlink || menuItem != MENU_PDURATION) {
       lcd.setCursor(4, 1);
-      lcd.print(1.0 * menuData[MENU_PDURATION] + 10 - 0.1 * menuData[MENU_PSHIFT]);
+      lcd.print(1.0 * menuData[MENU_PDURATION]); // + 10 - 0.1 * menuData[MENU_POWER]);
       lcd.print(" ms");
     }
   }
@@ -334,8 +271,9 @@ void loop()
 
 void zeroCrossInterrupt() {
   // We have to add ~300us to compensate zero-detection pre-pulse
-  // zeroCrossTime = micros() + 300;
+  // zeroCrossTime = micros() + zeroCrossDelay;
   flagZero = true;
+  wavePlus = !wavePlus;
 }
 
 void eepromLoad() {
@@ -363,4 +301,15 @@ SIGNAL(TIMER0_COMPA_vect)
   if (!flagFire && digitalRead(pinFire) == LOW)
     flagFire = true;
 }
+
+// Due to simistor switch off lag we rescale user power to somewhat more reasonable
+// User value shold be in %
+inline int user2power(int userValue){
+    if(userValue>99) 
+      return 100;    // full power mode
+    else
+      return 0.9*userValue;
+}
+
+
 
